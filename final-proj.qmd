@@ -192,6 +192,16 @@ earnings_data <- earnings_data %>%
     )
   )
 
+earnings_data <- earnings_data %>%
+  mutate(
+    university_treatment = case_when(
+      # University or higher education (codes 511, 512, 52)
+      education_level %in% c(511, 512, 52) ~ 1,
+      # Below university education
+      education_level %in% c(1, 2, 3, 41, 42) ~ 0,
+      TRUE ~ NA_real_
+    )
+  )
 ```
 
 ## Exploratory Data Analysis (EDA)
@@ -219,6 +229,7 @@ earnings_data <- earnings_data %>%
     treatment1,
     treatment2,
     treatment3,
+    university_treatment
   )
 
 ```
@@ -497,8 +508,8 @@ lm_model <- linear_reg() %>%
 wage_recipe <- recipe(
   log_hourly_wage ~ 
     age + age_sq + gender + marital_status + 
-    region + education_level + working_hours + 
-    treatment1 + treatment2 + treatment3,
+    region +  working_hours + university_treatment,
+    
   data = earnings_training) %>%
   # Convert categorical variables to dummy variables
   step_dummy(all_nominal_predictors()) %>%
@@ -572,15 +583,12 @@ Now we employ a DML model for predicting the log hour earning of a employed indi
 ```{r}
 
 
-# After the data cleaning and feature engineering sections, we'll implement DML
-
-# First, let's prepare our data for DML
-# We need to specify our outcome (Y), treatment (D), and covariates (X)
+# Prepare data for DML
 dml_data_prep <- earnings_data %>%
-  # We'll focus on treatment1 (8-year compulsory education policy)
   select(
-    log_hourly_wage,  # Outcome (Y)
-    treatment1,       # Treatment (D)
+    log_hourly_wage,        # Outcome variable (Y)
+    university_treatment,    # Treatment variable (D)
+    # Control variables (X)
     age,
     age_sq,
     gender,
@@ -588,110 +596,91 @@ dml_data_prep <- earnings_data %>%
     region,
     working_hours
   ) %>%
-  na.omit() %>% # Remove any NA values
-  as.data.table()  # Convert to data.table format - this is the key fix
+  na.omit() %>%
+  as.data.table()
 
 # Create DoubleML data object
-dml_obj_data <- double_ml_data_from_data_frame(
+dml_obj <- double_ml_data_from_data_frame(
   df = dml_data_prep,
   y_col = "log_hourly_wage",
-  d_col = "treatment1",
+  d_col = "university_treatment",
   x_cols = c("age", "age_sq", "gender", "marital_status", 
              "region", "working_hours")
 )
 
-# Let's specify multiple ML learners to compare different approaches
-# 1. Linear models
-learner_lm <- lrn("regr.lm")
-learner_logit <- lrn("classif.log_reg")
+# Create learners for both stages
+# For predicting university attendance (classification task)
+learner_class <- lrn("classif.ranger",
+                     num.trees = 500,
+                     min.node.size = 5,
+                     importance = "permutation")
 
-# 2. Random Forest models
-learner_rf_reg <- lrn("regr.ranger", 
-                      num.trees = 500, 
-                      min.node.size = 5)
-learner_rf_class <- lrn("classif.ranger", 
-                        num.trees = 500, 
-                        min.node.size = 5)
+# For predicting wages (regression task)
+learner_reg <- lrn("regr.ranger",
+                   num.trees = 500,
+                   min.node.size = 5,
+                   importance = "permutation")
 
-# Create DML model objects for different combinations
-# 1. Linear models combination
-dml_plr_linear <- DoubleMLPLR$new(
-  data = dml_obj_data,
-  ml_l = learner_lm,      # For outcome model
-  ml_m = learner_logit,   # For treatment model
-  n_folds = 5,
+# Create and fit DML model
+dml_plr <- DoubleMLPLR$new(
+  data = dml_obj,
+  ml_l = learner_reg,    # For wage equation
+  ml_m = learner_class,  # For university attendance equation
+  n_folds = 5,          
   score = "partialling out"
 )
 
-# 2. Random Forest combination
-dml_plr_rf <- DoubleMLPLR$new(
-  data = dml_obj_data,
-  ml_l = learner_rf_reg,    # For outcome model
-  ml_m = learner_rf_class,  # For treatment model
-  n_folds = 5,
-  score = "partialling out"
-)
 
-# Fit both models
-set.seed(123)  # For reproducibility
-dml_plr_linear_fit <- dml_plr_linear$fit()
-dml_plr_rf_fit <- dml_plr_rf$fit()
-
-# Compare results
-print("Linear Models DML Results:")
-print(dml_plr_linear_fit)
-
-print("\nRandom Forest DML Results:")
-print(dml_plr_rf_fit)
+# Fit the model
+set.seed(123)
+dml_plr_fit <- dml_plr$fit()
 
 ```
 
 ```{r}
 
-# First, let's see what information we can access from our DML objects
-# Let's modify our extraction function to work with the actual structure of DML results
+# Extract and format results
+results <- data.frame(
+  Estimate = dml_plr_fit$coef,
+  Std_Error = dml_plr_fit$se,
+  t_stat = dml_plr_fit$t_stat,
+  p_value = dml_plr_fit$pval,
+  CI_lower = dml_plr_fit$coef - 1.96 * dml_plr_fit$se,
+  CI_upper = dml_plr_fit$coef + 1.96 * dml_plr_fit$se
+)
 
-# Corrected extraction function that matches the actual DML object structure
-extract_dml_results <- function(dml_fit, model_name) {
-    data.frame(
-        Model = model_name,
-        Estimate = as.numeric(dml_fit$coef),         # Direct access works
-        Std_Error = as.numeric(dml_fit$se),          # Use se instead of standard_errors
-        t_stat = as.numeric(dml_fit$t_stat),         # Use t_stat instead of t_stats
-        p_value = as.numeric(dml_fit$pval),          # Use pval instead of pvalues
-        CI_lower = as.numeric(dml_fit$coef - 1.96 * dml_fit$se),
-        CI_upper = as.numeric(dml_fit$coef + 1.96 * dml_fit$se),
-        stringsAsFactors = FALSE
-    )
-}
+# Add bootstrap for more robust confidence intervals
+dml_plr$bootstrap(n_rep = 1000)
 
-# Get results for both models
-results_linear <- extract_dml_results(dml_plr_linear_fit, "Linear DML")
-results_rf <- extract_dml_results(dml_plr_rf_fit, "Random Forest DML")
 
-# Combine the results
-dml_results <- rbind(results_linear, results_rf)
+# Create a detailed summary table
+results_summary <- data.frame(
+    Estimate = dml_plr_fit$coef,
+    Std_Error = dml_plr_fit$se,
+    t_statistic = dml_plr_fit$t_stat,
+    p_value = dml_plr_fit$pval,
+    CI_lower = dml_plr_fit$coef - 1.96 * dml_plr_fit$se,
+    CI_upper = dml_plr_fit$coef + 1.96 * dml_plr_fit$se
+)
 
-# Create visualization with confidence intervals and numerical results
-ggplot(dml_results, aes(x = Model, y = Estimate)) +
-    geom_point(size = 3) +
+# Print formatted results
+print(results_summary)
+
+
+# Create a visualization of the results
+ggplot(results_summary, aes(x = "University Effect")) +
+    geom_point(aes(y = Estimate), size = 3) +
     geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper), width = 0.2) +
-    geom_text(aes(label = sprintf("Estimate: %.3f\nSE: %.3f\np-value: %.3e",
-                                 Estimate, Std_Error, p_value)),
-              vjust = -1, size = 3) +
-    labs(title = "Comparison of DML Estimates",
-         subtitle = "Effect of 8-Year Compulsory Education on Log Hourly Wages",
-         y = "Estimated Treatment Effect",
+    geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+    labs(title = "Effect of University Education on Log Hourly Wages",
+         subtitle = "Estimated using Double Machine Learning",
+         y = "Estimated Effect",
          x = "") +
     theme_minimal() +
-    coord_flip() +
-    ylim(min(dml_results$CI_lower) - 0.1, max(dml_results$CI_upper) + 0.1)
-
-# Print numerical results in a nicely formatted table
-print("Detailed Results:")
-print(dml_results %>%
-    mutate(across(where(is.numeric), round, 4)) %>%
-    as.data.frame())
+    annotate("text", x = 1, y = max(results_summary$CI_upper) + 0.1,
+             label = sprintf("Estimate: %.3f\np-value: %.3e",
+                           results_summary$Estimate,
+                           results_summary$p_value))
 ```
 
 #### Performance Measurements
