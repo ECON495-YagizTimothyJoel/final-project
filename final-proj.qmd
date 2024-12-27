@@ -212,7 +212,7 @@ earnings_data <- earnings_data %>%
 
 ```{r}
 
-# filter intermediave variables
+# filter intermediate variables
 earnings_data <- earnings_data %>%
   select(
     year,
@@ -276,9 +276,6 @@ compare_stats <- function(data_before, data_after) {
     after_stats %>% mutate(dataset = "After NA removal")
   ))
 }
-
-# Run comparison
-compare_stats(earnings_data, earnings_data_clean)
 ```
 
 ### Plots
@@ -324,7 +321,7 @@ p4 <- earnings_data %>%
   group_by(region) %>%
   summarise(mean_wage = mean(log_hourly_wage, na.rm = TRUE)) %>%
   ggplot(aes(x = reorder(region, mean_wage), y = mean_wage)) +
-  geom_bar(stat = "identity", fill = "skyblue") +
+  geom_bar(stat = "identity", fill = "lightblue") +
   coord_flip() +
   labs(
     title = "Average Log Hourly Wage by Region",
@@ -336,6 +333,8 @@ p4 <- earnings_data %>%
 
 # Arrange plots in a grid
 grid.arrange(p1, p2, p3, p4, ncol = 2)
+
+ggsave("firsts_plots.jpg", plot = grid.arrange(p1, p2, p3, p4, ncol = 2), width = 12, height = 8, dpi = 300, units = "in")
 
 ```
 
@@ -366,13 +365,16 @@ set.seed(123)
 # G: Gender
 # A: Age
 # M: Marital Status
+# S: Schooling
+
 dag <- dagify(
     # Direct effects on Log hourly earnings (Y)
-    Y ~ R + G + A + M,
+    Y ~ R + G + A + M + S,
     
     # Potential relationships between explanatory variables
-    M ~ A + G,  # Marital status might be influenced by age and gender
-    G ~ R,      # Gender composition might vary by region
+    S ~ R + G + A, #Schooling might be affected by region, gender and age.
+    M ~ A + G,  # Marital status might be influenced by age and gender.
+    G ~ R,      # Gender composition might vary by region.
     
     # Add variable labels for clarity
     labels = c(
@@ -380,16 +382,40 @@ dag <- dagify(
         "R" = "Region",
         "G" = "Gender",
         "A" = "Age",
-        "M" = "Marital Status"
+        "M" = "Marital Status",
+        "S" = "Schooling"
     )
 ) %>%
     tidy_dagitty()
 
 # Create the visualization with improved styling
-ggdag_classic(dag, node_size=10) + 
-    theme_dag_blank() +
+dag_plot <- ggplot(dag) +
+    geom_dag_edges_link(
+        aes(x = x, y = y, xend = xend, yend = yend, circular = circular),
+        arrow = grid::arrow(length = unit(0.3, "cm"), type = "closed"),
+        edge_alpha = 0.8
+    ) +
+    geom_dag_node(aes(x = x, y = y, fill = name), shape = 21, size = 18) +
+    geom_dag_text(aes(x = x, y = y, label = name), color = "black", fontface = "bold", size = 7) +
+    scale_fill_brewer(palette = "Blues") +                                        
     ggtitle("DAG for Earnings Analysis") +
-    theme(plot.title = element_text(hjust = 0.5))
+    theme_dag_blank() +
+    theme(
+        plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+        legend.position = "none"
+    )
+
+# Display the plot
+dag_plot
+
+ggsave(
+  filename = "dag.jpg",  # File name
+  plot = last_plot(),            # Use the last plot created
+  width = 12,                    # Width in inches
+  height = 10,                   # Height in inches
+  dpi = 300,                     # Resolution in dots per inch
+  units = "in"                   # Units for dimensions
+)
 
 ```
 
@@ -399,7 +425,7 @@ In this section, we will employ 2 machine learning models: Ordinary Least Square
 
 **Idea:**
 
-1.  We will first train a OLS model to predict the earnings, measure its performance and investigate the interpretability with regards to associations highlighted in DAG
+1.  We will first train an OLS model to predict the earnings, measure its performance and investigate the interpretability with regards to associations highlighted in DAG
 2.  Then we will employ a modern DML model that promise to be more interpretable than OLS. We will compare the performance and causal estimates compared to baseline OLS model.
 
 ### Splitting Training & Testing Data
@@ -443,7 +469,7 @@ p1 <- ggplot() +
        y = "Density",
        color = "Dataset") +
   theme_minimal() +
-  scale_color_manual(values = c("Training" = "blue", "Testing" = "red"))
+  scale_color_manual(values = c("Training" = "skyblue", "Testing" = "indianred1"))
 
 # 2. Box plots for a different perspective
 p2 <- bind_rows(
@@ -487,7 +513,9 @@ print("Summary Statistics for Training and Testing Sets:")
 print(summary_stats)
 
 # Display both plots side by side
-gridExtra::grid.arrange(p1, p2, ncol = 2)
+plots_balanced_dist <- gridExtra::grid.arrange(p1, p2, ncol = 2)
+
+ggsave("balanced_dist_plots.jpg", plot = plots_balanced_dist, width = 12, height = 8, dpi = 300, units = "in")
 
 ```
 
@@ -508,14 +536,12 @@ lm_model <- linear_reg() %>%
 wage_recipe <- recipe(
   log_hourly_wage ~ 
     age + age_sq + gender + marital_status + 
-    region +  working_hours + university_treatment,
-    
-  data = earnings_training) %>%
-  # Convert categorical variables to dummy variables
+    region + working_hours + treatment2,
+    data = earnings_training
+) %>%
   step_dummy(all_nominal_predictors()) %>%
-  # Center and scale numeric predictors
-  step_normalize(all_numeric_predictors()) %>%
-  # Remove any variables with zero variance
+  # Normalize everything except university_treatment
+  step_normalize(all_numeric_predictors(), -treatment2) %>%
   step_zv(all_predictors())
 
 
@@ -564,15 +590,17 @@ print("Model Performance Metrics:")
 print(model_metrics)
 
 # Create a scatter plot of predicted vs actual values
-ggplot(wage_predictions, aes(x = log_hourly_wage, y = .pred)) +
-  geom_point(alpha = 0.5) +
-  geom_abline(color = "red", linetype = "dashed") +
+plot_pred_vs_actual <- ggplot(wage_predictions, aes(x = log_hourly_wage, y = .pred)) +
+  geom_point(alpha = 0.5, color = "skyblue") +
+  geom_abline(color = "red", linetype = "dashed", size = 1) +
   labs(
     title = "Predicted vs Actual Log Hourly Wages",
     x = "Actual Log Hourly Wage",
     y = "Predicted Log Hourly Wage"
   ) +
   theme_minimal()
+
+ggsave("plot_predicted_vs_actual.jpg", plot = plot_pred_vs_actual, width = 12, height = 8, dpi = 300, units = "in")
 
 ```
 
@@ -584,17 +612,17 @@ Now we employ a DML model for predicting the log hour earning of a employed indi
 
 
 # Prepare data for DML
-dml_data_prep <- earnings_data %>%
+dml_data_prep <- earnings_data %>% 
   select(
     log_hourly_wage,        # Outcome variable (Y)
-    university_treatment,    # Treatment variable (D)
+    treatment2,             # Treatment variable (D)
     # Control variables (X)
     age,
     age_sq,
     gender,
     marital_status,
     region,
-    working_hours
+    working_hours,
   ) %>%
   na.omit() %>%
   as.data.table()
@@ -603,7 +631,7 @@ dml_data_prep <- earnings_data %>%
 dml_obj <- double_ml_data_from_data_frame(
   df = dml_data_prep,
   y_col = "log_hourly_wage",
-  d_col = "university_treatment",
+  d_col = "treatment2",
   x_cols = c("age", "age_sq", "gender", "marital_status", 
              "region", "working_hours")
 )
@@ -637,21 +665,9 @@ dml_plr_fit <- dml_plr$fit()
 
 ```
 
+#### Performance Measurements
+
 ```{r}
-
-# Extract and format results
-results <- data.frame(
-  Estimate = dml_plr_fit$coef,
-  Std_Error = dml_plr_fit$se,
-  t_stat = dml_plr_fit$t_stat,
-  p_value = dml_plr_fit$pval,
-  CI_lower = dml_plr_fit$coef - 1.96 * dml_plr_fit$se,
-  CI_upper = dml_plr_fit$coef + 1.96 * dml_plr_fit$se
-)
-
-# Add bootstrap for more robust confidence intervals
-dml_plr$bootstrap(n_rep = 1000)
-
 
 # Create a detailed summary table
 results_summary <- data.frame(
@@ -668,8 +684,8 @@ print(results_summary)
 
 
 # Create a visualization of the results
-ggplot(results_summary, aes(x = "University Effect")) +
-    geom_point(aes(y = Estimate), size = 3) +
+visual_results_dml <- ggplot(results_summary, aes(x = "University Effect")) +
+    geom_point(aes(y = Estimate), size = 3, color = "blue") +
     geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper), width = 0.2) +
     geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
     labs(title = "Effect of University Education on Log Hourly Wages",
@@ -681,37 +697,102 @@ ggplot(results_summary, aes(x = "University Effect")) +
              label = sprintf("Estimate: %.3f\np-value: %.3e",
                            results_summary$Estimate,
                            results_summary$p_value))
+
+ggsave("visual_results_dml.jpg", plot = visual_results_dml, width = 12, height = 8, dpi = 300, units = "in")
+
+
+
+
 ```
 
-#### Performance Measurements
+### Instrumental Variable
 
 ```{r}
+# First, create our instrument based on the reform
+earnings_data <- earnings_data %>%
+  mutate(
+    # Calculate birth year and age in 2012
+    birth_year = year - age,
+    age_in_2012 = 2012 - birth_year,
+    
+    # Create reform instrument
+    # People who were 14 or younger in 2012 were affected by the reform
+    reform_instrument = case_when(
+      age_in_2012 <= 14 ~ 1,      # Affected by reform
+      age_in_2012 > 14 ~ 0,       # Not affected
+      TRUE ~ NA_real_
+    )
+  )
 
-# We will measure performance by employing trained model agains test data
-...
+# Now let's implement 2SLS (Two-Stage Least Squares)
+# First stage: Predict high school completion using the reform
+first_stage <- lm(treatment2 ~ 
+                  reform_instrument + 
+                  age + age_sq + gender + marital_status + 
+                  region + working_hours,
+                  data = earnings_data)
+
+# Generate predicted values from first stage
+earnings_data$predicted_education <- predict(first_stage)
+
+# Second stage: Use predicted education to estimate wage effects
+second_stage <- lm(log_hourly_wage ~ 
+                   predicted_education +
+                   age + age_sq + gender + marital_status + 
+                   region + working_hours,
+                   data = earnings_data)
+
+# For proper standard errors, we should use the iv_robust function
+# from the estimatr package
+library(estimatr)
+
+iv_model <- iv_robust(
+  log_hourly_wage ~ treatment2 + 
+    age + age_sq + gender + marital_status + 
+    region + working_hours | 
+    reform_instrument + 
+    age + age_sq + gender + marital_status + 
+    region + working_hours,
+  data = earnings_data
+)
+
+summary(iv_model)
+
 
 ```
-
-### 
 
 ## Conclusion
 
-...
+Research Question: Was “4+4+4” policy effective?
+
+Baseline Model Linear Regression showed promising results with \~50% accuracy (RMSE) and it predicted completing highschool increased wages by 43%
+
+Using the DAG we argued that there would be endogenous variation in our treatment variable (highschool completion, specifically gender and region
+
+Then we used a state-of-the-art Double Machine Learning Technique for eliminating this endogenous variation.
+
+Our DML model predicted that highschool completion increases wages by 39% - 4% less than baseline prediction.\
+\
+We argue that this 4% was the overestimation of baseline model coming from endogenous variation.
+
+Hence we argue that real effect of highschool completion is 39%, statistically significant and notably large.
+
+Hence we conclude that policy change was a effective.
 
 ## References
 
-Angrist, J. D., & Krueger, A. B. (1991). Does Compulsory School Attendance Affect Schooling and Earnings?. *The Quarterly Journal of Economics*, *106*(4), 979–1014. <https://doi.org/10.2307/2937954>
+Angrist, J. D., & Krueger, A. B. (1991). Does Compulsory School Attendance Affect Schooling and Earnings?. *The Quarterly Journal of Economics*, *106*(4), 979--1014. <https://doi.org/10.2307/2937954>
 
-Becker, G. S. (1962). Investment in Human Capital: A Theoretical Analysis. *Journal of Political Economy*, *70*(5, Part 2), 9–49. <https://doi.org/10.1086/258724>
+Becker, G. S. (1962). Investment in Human Capital: A Theoretical Analysis. *Journal of Political Economy*, *70*(5, Part 2), 9--49. <https://doi.org/10.1086/258724>
 
 Fang, H., Eggleston, K. N., Rizzo, J. A., Rozelle, S., & Zeckhauser, R. J. (2012). *The Returns to Education in China: Evidence from the 1986 Compulsory Education Law* (Working Paper No. 18189). National Bureau of Economic Research. <https://doi.org/10.3386/w18189>
 
-Harmon, C., & Walker, I. (1995). Estimates of the Economic Return to Schooling for the United Kingdom. *The American Economic Review*, *85*(5), 1278–1286.
+Harmon, C., & Walker, I. (1995). Estimates of the Economic Return to Schooling for the United Kingdom. *The American Economic Review*, *85*(5), 1278--1286.
 
-Mincer, J. A. (1974). The Human Capital Earnings Function. In *Schooling, Experience, and Earnings* (pp. 83–96). NBER. <https://www.nber.org/books-and-chapters/schooling-experience-and-earnings/human-capital-earnings-function>
+Mincer, J. A. (1974). The Human Capital Earnings Function. In *Schooling, Experience, and Earnings* (pp. 83--96). NBER. <https://www.nber.org/books-and-chapters/schooling-experience-and-earnings/human-capital-earnings-function>
 
-Oreopoulos, P. (2006). Estimating Average and Local Average Treatment Effects of Education when Compulsory Schooling Laws Really Matter. *American Economic Review*, *96*(1), 152–175. <https://doi.org/10.1257/000282806776157641>
+Oreopoulos, P. (2006). Estimating Average and Local Average Treatment Effects of Education when Compulsory Schooling Laws Really Matter. *American Economic Review*, *96*(1), 152--175. <https://doi.org/10.1257/000282806776157641>
 
-Pischke, J.-S., & von Wachter, T. (2008). Zero Returns to Compulsory Schooling in Germany: Evidence and Interpretation. *The Review of Economics and Statistics*, *90*(3), 592–598. <https://doi.org/10.1162/rest.90.3.592>
+Pischke, J.-S., & von Wachter, T. (2008). Zero Returns to Compulsory Schooling in Germany: Evidence and Interpretation. *The Review of Economics and Statistics*, *90*(3), 592--598. <https://doi.org/10.1162/rest.90.3.592>
 
-Schultz, T. W. (1961). Investment in Human Capital. *The American Economic Review*, *51*(1), 1–17.
+Schultz, T. W. (1961). Investment in Human Capital. *The American Economic Review*, *51*(1), 1--17.
